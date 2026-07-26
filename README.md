@@ -10,29 +10,32 @@ Distribución: igual que `@ai4u/platform`, `@ai4u/mc-sso`, `@ai4u/design-system`
 
 ## Qué resuelve (y qué NO)
 
-- **Sí**: el vocabulario SAP (`ENTITY_MAP`) que hoy vive copiado byte a byte en
-  `mission-control` y `sap-b1-chat` — un solo lugar para que "ventas/pedidos" siempre
-  signifique lo mismo en todo el ecosistema.
-- **No** (todavía, y a propósito): el cliente HTTP hacia `sap-b1-backend`
-  (`BackendClient`). Existe una copia en `mission-control` y otra en `sap-b1-chat`,
-  pero **no son iguales**: la de `sap-b1-chat` agrega un header `x-mc-secret` para
-  auth de servicio a servicio (`kpis → backend`, ver `sap-b1-backend/lib/auth.ts`),
-  que `mission-control` no necesita. Unificarlas a ciegas sería perder esa
-  funcionalidad real, no una limpieza — queda documentado para decidir con
-  intención en una pasada aparte, no en esta.
+- **Sí**: el vocabulario SAP (`ENTITY_MAP`) — un solo lugar para que "ventas/pedidos"
+  siempre signifique lo mismo en todo el ecosistema.
+- **Sí (desde v0.2.0)**: `BackendClient`, el cliente HTTP hacia `sap-b1-backend`.
+  Vivía duplicado en `mission-control` y `sap-b1-chat`, con una diferencia real (no
+  accidental): `sap-b1-chat` agrega un header opcional `x-mc-secret` para auth de
+  servicio a servicio (`kpis → backend`). Se decidió unificar con la versión de
+  `sap-b1-chat` (superset aditivo) tras verificar en el código real de
+  `sap-b1-backend/lib/auth.ts` que `X-API-Key` se revisa primero y retorna de
+  inmediato si es válido — el header `x-mc-secret` nunca se alcanza para requests
+  que ya traen una key válida (el caso de `mission-control`, siempre). Cero cambio
+  de comportamiento para ninguno de los dos, verificado con 6 tests que prueban
+  exactamente esa precedencia (`tests/backend-client.test.ts`).
 - **No**: la observabilidad (`bootstrapObservability`). Es lógica de arranque
   (kernel), no vocabulario — pertenece a `@ai4u/platform`, no acá.
 
 ## Instalación
 
 ```bash
-npm install github:ai4u-com-co/contracts#v0.1.0
+npm install github:ai4u-com-co/contracts#v0.2.0
 ```
 
 ## Uso
 
 ```ts
-import { ENTITY_MAP, type EntityConfig } from "@ai4u/contracts"
+import { ENTITY_MAP, type EntityConfig, BackendClient } from "@ai4u/contracts"
 
 const cfg = ENTITY_MAP["ventas/pedidos"]
+const client = new BackendClient(tenantId, apiKey)
 ```

@@ -1,6 +1,6 @@
 {
   "name": "@ai4u/contracts",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Vocabulario compartido del ecosistema superAI: tipos y mapas de entidades SAP que dos o más repos necesitan ver idénticos.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
