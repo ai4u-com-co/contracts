@@ -1,3 +1,10 @@
+type CatalogListResult = {
+    queries: Array<{
+        name: string;
+        description: string;
+        params: string[];
+    }>;
+};
 /**
  * Cliente único de sap-b1-backend, compartido entre mission-control y sap-b1-chat.
  * Vivía duplicado en ambos repos, byte a byte igual salvo por headers(): sap-b1-chat
@@ -25,13 +32,7 @@ export declare class BackendClient {
         rows: unknown[];
         count: number;
     }>;
-    catalogList(): Promise<{
-        queries: Array<{
-            name: string;
-            description: string;
-            params: string[];
-        }>;
-    }>;
+    catalogList(): Promise<CatalogListResult>;
     catalogQuery(name: string, params?: unknown, limit?: number): Promise<{
         rows: unknown[];
         count: number;
@@ -42,4 +43,5 @@ export declare class BackendClient {
         ok?: boolean;
     }>;
 }
+export {};
 //# sourceMappingURL=backend-client.d.ts.map

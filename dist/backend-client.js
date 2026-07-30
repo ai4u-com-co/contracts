@@ -4,6 +4,15 @@ exports.BackendClient = void 0;
 const BACKEND_URL = process.env.BACKEND_URL ??
     process.env.NEXT_PUBLIC_BACKEND_URL ??
     "http://localhost:4100";
+// ── Cache en memoria del catálogo de queries por tenant ─────────────────────
+// El catálogo (nombres/descripciones/params de las queries predefinidas) cambia
+// con despliegues del backend, no por request — a diferencia de schema/sapQuery/
+// odata (datos SAP vivos, deben quedar siempre no-store), cachearlo evita pegarle
+// al backend en cada mensaje de un chat. TTL 1h, mismo criterio que fetchSapContext
+// en sap-b1-chat. Best-effort: Map de módulo, no sobrevive cold starts serverless,
+// pero sí ahorra dentro de una instancia caliente.
+const CATALOG_TTL_MS = 60 * 60 * 1000;
+const catalogListCache = new Map();
 /**
  * Cliente único de sap-b1-backend, compartido entre mission-control y sap-b1-chat.
  * Vivía duplicado en ambos repos, byte a byte igual salvo por headers(): sap-b1-chat
@@ -75,8 +84,14 @@ class BackendClient {
     sapQuery(sql, limit = 500) {
         return this.post("/query", { sql, limit });
     }
-    catalogList() {
-        return this.get("/query/catalog");
+    async catalogList() {
+        const cached = catalogListCache.get(this.tenant);
+        if (cached && cached.expiresAt > Date.now()) {
+            return cached.data;
+        }
+        const data = await this.get("/query/catalog");
+        catalogListCache.set(this.tenant, { data, expiresAt: Date.now() + CATALOG_TTL_MS });
+        return data;
     }
     catalogQuery(name, params, limit) {
         return this.post("/query/catalog", {
