@@ -4,6 +4,67 @@ const BACKEND_URL =
   "http://localhost:4100"
 
 /**
+ * Error tipado de una llamada al backend. Conserva el formato de `message` de
+ * siempre (`Backend {METHOD} {path} ({status}): {body}`) para no romper a quien
+ * lo parsea como texto, y además expone los campos del envelope JSON del
+ * backend para clasificar sin regex frágiles:
+ *   { error, code, uncertain, sapCode?, sapMessage?, table?, column? }
+ * (`sapCode`/`sapMessage`/`table`/`column` solo vienen en rechazos 4xx de SAP.)
+ */
+export class BackendError extends Error {
+  readonly name = "BackendError"
+  readonly method: string
+  readonly path: string
+  readonly status: number
+  readonly body: string
+  /** Código estable del backend: SAP_TIMEOUT, SAP_QUERY_ERROR, SAP_UNREACHABLE, ... */
+  readonly code?: string
+  /** Mensaje seguro (en español) que el backend puso en `error`. */
+  readonly backendMessage?: string
+  readonly uncertain?: boolean
+  readonly sapCode?: string
+  readonly sapMessage?: string
+  readonly table?: string
+  readonly column?: string
+  /** x-request-id enviado en la llamada (para cruzar con los logs del backend). */
+  readonly requestId?: string
+
+  constructor(method: string, path: string, status: number, body: string, requestId?: string) {
+    super(`Backend ${method} ${path} (${status}): ${body}`)
+    this.method = method
+    this.path = path
+    this.status = status
+    this.body = body
+    this.requestId = requestId
+    let parsed: Record<string, unknown> | null = null
+    try {
+      const j = JSON.parse(body)
+      if (j && typeof j === "object" && !Array.isArray(j)) parsed = j as Record<string, unknown>
+    } catch {
+      /* cuerpo no-JSON (HTML de un 504 de Vercel, texto plano): solo status */
+    }
+    const str = (k: string) => (parsed && typeof parsed[k] === "string" ? (parsed[k] as string) : undefined)
+    this.code = str("code")
+    this.backendMessage = str("error")
+    this.uncertain = parsed && typeof parsed.uncertain === "boolean" ? (parsed.uncertain as boolean) : undefined
+    this.sapCode = parsed && (typeof parsed.sapCode === "string" || typeof parsed.sapCode === "number") ? String(parsed.sapCode) : undefined
+    this.sapMessage = str("sapMessage")
+    this.table = str("table")
+    this.column = str("column")
+  }
+}
+
+export interface BackendClientOptions {
+  /**
+   * Se envía como `x-request-id`. El middleware del backend lo reusa como su
+   * requestId, así que el log del consumidor y el del backend quedan unidos.
+   */
+  requestId?: string
+  /** Se envía como `x-consumer` (p. ej. "sap-b1-chat") para atribuir el tráfico en los logs del backend. */
+  consumer?: string
+}
+
+/**
  * Cliente único de sap-b1-backend, compartido entre mission-control y sap-b1-chat.
  * Vivía duplicado en ambos repos, byte a byte igual salvo por headers(): sap-b1-chat
  * agregaba un header opcional x-mc-secret (auth de servicio a servicio, kpis->backend)
@@ -16,11 +77,18 @@ export class BackendClient {
   private base: string
   readonly tenant: string
   private apiKey: string
+  private opts: BackendClientOptions
 
-  constructor(tenant: string, apiKey: string) {
+  constructor(tenant: string, apiKey: string, opts: BackendClientOptions = {}) {
     this.tenant = tenant
     this.apiKey = apiKey
+    this.opts = opts
     this.base = `${BACKEND_URL}/api/v1/${tenant}`
+  }
+
+  /** x-request-id que este cliente envía (si se configuró). */
+  get requestId(): string | undefined {
+    return this.opts.requestId
   }
 
   private headers(): HeadersInit {
@@ -32,6 +100,8 @@ export class BackendClient {
     if (serviceSecret) {
       headers["x-mc-secret"] = serviceSecret
     }
+    if (this.opts.requestId) headers["x-request-id"] = this.opts.requestId
+    if (this.opts.consumer) headers["x-consumer"] = this.opts.consumer
     return headers
   }
 
@@ -42,7 +112,7 @@ export class BackendClient {
     })
     if (!res.ok) {
       const text = await res.text().catch(() => "")
-      throw new Error(`Backend GET ${path} (${res.status}): ${text}`)
+      throw new BackendError("GET", path, res.status, text, this.opts.requestId)
     }
     return res.json() as Promise<T>
   }
@@ -56,7 +126,7 @@ export class BackendClient {
     })
     if (!res.ok) {
       const text = await res.text().catch(() => "")
-      throw new Error(`Backend POST ${path} (${res.status}): ${text}`)
+      throw new BackendError("POST", path, res.status, text, this.opts.requestId)
     }
     return res.json() as Promise<T>
   }
@@ -70,7 +140,7 @@ export class BackendClient {
     })
     if (!res.ok) {
       const text = await res.text().catch(() => "")
-      throw new Error(`Backend PATCH ${path} (${res.status}): ${text}`)
+      throw new BackendError("PATCH", path, res.status, text, this.opts.requestId)
     }
   }
 
