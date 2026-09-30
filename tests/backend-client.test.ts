@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { BackendClient, BackendError } from "../src/backend-client"
+import { BackendClient, BackendError, resolveConsumer } from "../src/backend-client"
 
 function mockFetchOk(body: unknown = {}) {
   return vi.fn().mockResolvedValue({
@@ -87,8 +87,14 @@ describe("BackendClient", () => {
 
 describe("BackendClient — trazabilidad y errores tipados", () => {
   const originalFetch = global.fetch
+  const originalEnv = { ...process.env }
+  beforeEach(() => {
+    delete process.env.SERVICE_ID
+    delete process.env.PLATFORM_SERVICE
+  })
   afterEach(() => {
     global.fetch = originalFetch
+    process.env = { ...originalEnv }
   })
 
   function mockFetchError(status: number, body: string) {
@@ -160,5 +166,90 @@ describe("BackendClient — trazabilidad y errores tipados", () => {
     global.fetch = mockFetchError(502, JSON.stringify({ error: "x", code: "SAP_QUERY_ERROR", sapCode: 702 })) as unknown as typeof fetch
     const err = await new BackendClient("tamaprint", "k").sapQuery("SELECT 1").catch((e) => e)
     expect(err.sapCode).toBe("702")
+  })
+})
+
+describe("BackendClient — x-consumer (Fase 3, atribución en el gateway)", () => {
+  const originalFetch = global.fetch
+  const originalEnv = { ...process.env }
+
+  beforeEach(() => {
+    delete process.env.SERVICE_ID
+    delete process.env.PLATFORM_SERVICE
+    delete process.env.BACKEND_SERVICE_SECRET
+    delete process.env.MISSION_CONTROL_SECRET
+  })
+
+  afterEach(() => {
+    global.fetch = originalFetch
+    process.env = { ...originalEnv }
+  })
+
+  async function headersOf(client: BackendClient) {
+    const fetchMock = mockFetchOk({ rows: [], count: 0 })
+    global.fetch = fetchMock as unknown as typeof fetch
+    await client.schema("q")
+    await client.sapQuery("SELECT 1")
+    await client.patch("/x", {})
+    return fetchMock.mock.calls.map((c) => c[1].headers as Record<string, string>)
+  }
+
+  it("sin opción ni SERVICE_ID/PLATFORM_SERVICE NO manda x-consumer", async () => {
+    const client = new BackendClient("tamaprint", "k")
+    for (const h of await headersOf(client)) expect(h).not.toHaveProperty("x-consumer")
+    expect(client.consumer).toBeUndefined()
+  })
+
+  it("usa SERVICE_ID como fallback en GET, POST y PATCH", async () => {
+    process.env.SERVICE_ID = "desarrollo-oc"
+    const client = new BackendClient("tamaprint", "k")
+    for (const h of await headersOf(client)) expect(h["x-consumer"]).toBe("desarrollo-oc")
+    expect(client.consumer).toBe("desarrollo-oc")
+  })
+
+  it("usa el alias PLATFORM_SERVICE si no hay SERVICE_ID", async () => {
+    process.env.PLATFORM_SERVICE = ["orderloader", "tamaprint"].join("-")
+    const client = new BackendClient("tamaprint", "k")
+    for (const h of await headersOf(client)) expect(h["x-consumer"]).toBe("orderloader-tamaprint")
+  })
+
+  it("SERVICE_ID tiene prioridad sobre PLATFORM_SERVICE", async () => {
+    process.env.SERVICE_ID = "canonico"
+    process.env.PLATFORM_SERVICE = "alias"
+    expect(resolveConsumer()).toBe("canonico")
+  })
+
+  it("la opción consumer tiene prioridad sobre la env", async () => {
+    process.env.SERVICE_ID = "desde-env"
+    const client = new BackendClient("tamaprint", "k", { consumer: "sap-b1-chat" })
+    for (const h of await headersOf(client)) expect(h["x-consumer"]).toBe("sap-b1-chat")
+  })
+
+  it("valores vacíos o solo espacios se ignoran (no manda header vacío)", async () => {
+    process.env.SERVICE_ID = "   "
+    process.env.PLATFORM_SERVICE = ""
+    const client = new BackendClient("tamaprint", "k", { consumer: "" })
+    for (const h of await headersOf(client)) expect(h).not.toHaveProperty("x-consumer")
+    process.env.SERVICE_ID = "  mission-control  "
+    expect(resolveConsumer("  ")).toBe("mission-control")
+  })
+
+  it("se resuelve por request: una env fijada después de construir el cliente se respeta", async () => {
+    const client = new BackendClient("tamaprint", "k")
+    process.env.PLATFORM_SERVICE = "seteado-en-runtime"
+    for (const h of await headersOf(client)) expect(h["x-consumer"]).toBe("seteado-en-runtime")
+  })
+
+  it("agregar x-consumer no altera los headers de auth (X-API-Key / x-mc-secret)", async () => {
+    const secreto = ["valor", "de", "prueba"].join("-")
+    process.env.MISSION_CONTROL_SECRET = secreto
+    process.env.SERVICE_ID = "sap-b1-chat"
+    const client = new BackendClient("tamaprint", "S2S_AUTH")
+    for (const h of await headersOf(client)) {
+      expect(h["X-API-Key"]).toBe("S2S_AUTH")
+      expect(h["x-mc-secret"]).toBe(secreto)
+      expect(h["x-consumer"]).toBe("sap-b1-chat")
+      expect(Object.keys(h).sort()).toEqual(["Content-Type", "X-API-Key", "x-consumer", "x-mc-secret"])
+    }
   })
 })

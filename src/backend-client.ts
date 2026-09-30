@@ -60,8 +60,39 @@ export interface BackendClientOptions {
    * requestId, así que el log del consumidor y el del backend quedan unidos.
    */
   requestId?: string
-  /** Se envía como `x-consumer` (p. ej. "sap-b1-chat") para atribuir el tráfico en los logs del backend. */
+  /**
+   * Se envía como `x-consumer` (p. ej. "sap-b1-chat") para atribuir el tráfico en
+   * los logs del backend. Es SOLO atribución: el backend nunca autoriza con él.
+   *
+   * Si no se pasa, se usa la env `SERVICE_ID` (nombre canónico del contrato de
+   * `@ai4u/config`) o su alias `PLATFORM_SERVICE`. Si no hay ninguno, el header no
+   * se manda (compatibilidad con los consumidores actuales).
+   *
+   * Convención del valor: nombre del proyecto en Vercel (`mission-control`,
+   * `desarrollo-oc`...) o, en Docker, el nombre de servicio de logs
+   * (`orderloader-tamaprint`).
+   */
   consumer?: string
+}
+
+/** Primer valor no vacío (tras trim) o undefined. */
+function firstNonEmpty(...values: Array<string | undefined>): string | undefined {
+  for (const v of values) {
+    const t = v?.trim()
+    if (t) return t
+  }
+  return undefined
+}
+
+/**
+ * Resuelve el valor de `x-consumer`: opción explícita > env `SERVICE_ID` >
+ * alias `PLATFORM_SERVICE` > undefined (no se manda el header).
+ * Se resuelve en cada request (no al construir) porque `@ai4u/platform` puede
+ * fijar `PLATFORM_SERVICE` en runtime vía `setServiceName()` después de que el
+ * cliente ya exista.
+ */
+export function resolveConsumer(explicit?: string): string | undefined {
+  return firstNonEmpty(explicit, process.env.SERVICE_ID, process.env.PLATFORM_SERVICE)
 }
 
 /**
@@ -86,6 +117,11 @@ export class BackendClient {
     this.base = `${BACKEND_URL}/api/v1/${tenant}`
   }
 
+  /** x-consumer que este cliente envía en este momento (opción > SERVICE_ID > PLATFORM_SERVICE), o undefined. */
+  get consumer(): string | undefined {
+    return resolveConsumer(this.opts.consumer)
+  }
+
   /** x-request-id que este cliente envía (si se configuró). */
   get requestId(): string | undefined {
     return this.opts.requestId
@@ -96,12 +132,23 @@ export class BackendClient {
     if (this.apiKey) {
       headers["X-API-Key"] = this.apiKey
     }
+    // TODO(fase3): auth S2S heredada — NO cambiar sin el paso correspondiente de la Fase 3.
+    //  1. X-API-Key (arriba): consumidores como sap-b1-chat (app/lib/session.ts,
+    //     getApiKey) pasan como apiKey el placeholder "S2S_AUTH" cuando no hay
+    //     `{TENANT}_SAP_API_KEY`; ese valor no es una key válida en el gateway.
+    //  2. x-mc-secret (abajo): secreto compartido BACKEND_SERVICE_SECRET ??
+    //     MISSION_CONTROL_SECRET, que el gateway (sap-b1-backend/lib/auth.ts)
+    //     acepta como fallback cuando X-API-Key no valida — es lo que hace
+    //     funcionar el caso "S2S_AUTH".
+    // Se retira/reemplaza por identidad OIDC tras medir con x-consumer quién
+    // depende de este camino.
     const serviceSecret = process.env.BACKEND_SERVICE_SECRET ?? process.env.MISSION_CONTROL_SECRET
     if (serviceSecret) {
       headers["x-mc-secret"] = serviceSecret
     }
     if (this.opts.requestId) headers["x-request-id"] = this.opts.requestId
-    if (this.opts.consumer) headers["x-consumer"] = this.opts.consumer
+    const consumer = resolveConsumer(this.opts.consumer)
+    if (consumer) headers["x-consumer"] = consumer
     return headers
   }
 

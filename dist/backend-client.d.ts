@@ -31,9 +31,28 @@ export interface BackendClientOptions {
      * requestId, así que el log del consumidor y el del backend quedan unidos.
      */
     requestId?: string;
-    /** Se envía como `x-consumer` (p. ej. "sap-b1-chat") para atribuir el tráfico en los logs del backend. */
+    /**
+     * Se envía como `x-consumer` (p. ej. "sap-b1-chat") para atribuir el tráfico en
+     * los logs del backend. Es SOLO atribución: el backend nunca autoriza con él.
+     *
+     * Si no se pasa, se usa la env `SERVICE_ID` (nombre canónico del contrato de
+     * `@ai4u/config`) o su alias `PLATFORM_SERVICE`. Si no hay ninguno, el header no
+     * se manda (compatibilidad con los consumidores actuales).
+     *
+     * Convención del valor: nombre del proyecto en Vercel (`mission-control`,
+     * `desarrollo-oc`...) o, en Docker, el nombre de servicio de logs
+     * (`orderloader-tamaprint`).
+     */
     consumer?: string;
 }
+/**
+ * Resuelve el valor de `x-consumer`: opción explícita > env `SERVICE_ID` >
+ * alias `PLATFORM_SERVICE` > undefined (no se manda el header).
+ * Se resuelve en cada request (no al construir) porque `@ai4u/platform` puede
+ * fijar `PLATFORM_SERVICE` en runtime vía `setServiceName()` después de que el
+ * cliente ya exista.
+ */
+export declare function resolveConsumer(explicit?: string): string | undefined;
 /**
  * Cliente único de sap-b1-backend, compartido entre mission-control y sap-b1-chat.
  * Vivía duplicado en ambos repos, byte a byte igual salvo por headers(): sap-b1-chat
@@ -49,6 +68,8 @@ export declare class BackendClient {
     private apiKey;
     private opts;
     constructor(tenant: string, apiKey: string, opts?: BackendClientOptions);
+    /** x-consumer que este cliente envía en este momento (opción > SERVICE_ID > PLATFORM_SERVICE), o undefined. */
+    get consumer(): string | undefined;
     /** x-request-id que este cliente envía (si se configuró). */
     get requestId(): string | undefined;
     private headers;
