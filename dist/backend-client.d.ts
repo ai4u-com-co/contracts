@@ -1,4 +1,18 @@
 /**
+ * Variables de entorno de donde sale la URL del gateway, en orden de prioridad.
+ * `SAP_BACKEND_URL` es el nombre canónico del contrato de `@ai4u/config/env`
+ * (`ENV_CONTRACT.SAP_BACKEND_URL`, Shared Env Var del team en Vercel); los otros dos
+ * son sus alias legados, en el mismo orden que el contrato. Se replica acá en vez de
+ * importar `readEnv` para no sumarle a este paquete (hoy sin dependencias) la de
+ * `@ai4u/config`, que arrastra `@supabase/supabase-js`. Un test compara esta lista
+ * con `ENV_CONTRACT` cuando corre dentro del monorepo kernel.
+ *
+ * Los alias `SAP_B1_BACKEND_URL` y `KPIS_APP_URL` del contrato NO se leen a propósito:
+ * el cliente nunca los leyó y sumarlos podría redirigir el tráfico de un consumidor
+ * que hoy los tiene seteados con otro sentido.
+ */
+export declare const BACKEND_URL_ENV_NAMES: readonly ["SAP_BACKEND_URL", "BACKEND_URL", "NEXT_PUBLIC_BACKEND_URL"];
+/**
  * Error tipado de una llamada al backend. Conserva el formato de `message` de
  * siempre (`Backend {METHOD} {path} ({status}): {body}`) para no romper a quien
  * lo parsea como texto, y además expone los campos del envelope JSON del
@@ -27,6 +41,12 @@ export declare class BackendError extends Error {
 }
 export interface BackendClientOptions {
     /**
+     * URL base del gateway sap-b1-backend (sin `/api/v1/...`). Si no se pasa, se usa la
+     * env `SAP_BACKEND_URL` o sus alias legados `BACKEND_URL` / `NEXT_PUBLIC_BACKEND_URL`.
+     * Ver `resolveBackendUrl()`.
+     */
+    baseUrl?: string;
+    /**
      * Se envía como `x-request-id`. El middleware del backend lo reusa como su
      * requestId, así que el log del consumidor y el del backend quedan unidos.
      */
@@ -54,6 +74,19 @@ export interface BackendClientOptions {
  */
 export declare function resolveConsumer(explicit?: string): string | undefined;
 /**
+ * Resuelve la URL base del gateway: opción explícita > `SAP_BACKEND_URL` >
+ * `BACKEND_URL` > `NEXT_PUBLIC_BACKEND_URL`. Valores vacíos o solo espacios se
+ * ignoran y se quitan las `/` finales.
+ *
+ * Sin ninguna: fuera de producción devuelve `http://localhost:4100`; en producción
+ * (`NODE_ENV === "production"` o `VERCEL_ENV === "production"`) lanza un Error que
+ * nombra `SAP_BACKEND_URL` en vez de mandar el tráfico a localhost.
+ *
+ * `BackendClient` la llama en cada request (no al cargar el módulo ni al construir),
+ * así un cambio de env en runtime o un módulo evaluado antes de cargar la env se respetan.
+ */
+export declare function resolveBackendUrl(explicit?: string): string;
+/**
  * Cliente único de sap-b1-backend, compartido entre mission-control y sap-b1-chat.
  * Vivía duplicado en ambos repos, byte a byte igual salvo por headers(): sap-b1-chat
  * agregaba un header opcional x-mc-secret (auth de servicio a servicio, kpis->backend)
@@ -63,11 +96,12 @@ export declare function resolveConsumer(explicit?: string): string | undefined;
  * requests que ya traen una key válida (el caso de mission-control, siempre).
  */
 export declare class BackendClient {
-    private base;
     readonly tenant: string;
     private apiKey;
     private opts;
     constructor(tenant: string, apiKey: string, opts?: BackendClientOptions);
+    /** URL de este tenant en el gateway, resuelta en cada request (ver `resolveBackendUrl`). */
+    private get base();
     /** x-consumer que este cliente envía en este momento (opción > SERVICE_ID > PLATFORM_SERVICE), o undefined. */
     get consumer(): string | undefined;
     /** x-request-id que este cliente envía (si se configuró). */

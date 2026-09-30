@@ -45,13 +45,17 @@ Distribución: igual que `@ai4u/platform`, `@ai4u/mc-sso`, `@ai4u/design-system`
   `SERVICE_ID` (canónica en `@ai4u/config`) / su alias `PLATFORM_SERVICE`. Sin
   ninguno, no manda el header. Es solo atribución: el gateway lo registra en
   `platform_logs` y nunca autoriza con él. Ver [Atribución con `x-consumer`](#atribución-con-x-consumer).
+- **Sí (desde v0.6.1)**: URL del gateway por el contrato de env. `BackendClient` lee
+  `SAP_BACKEND_URL` (canónica en `@ai4u/config`, Shared Env Var del team en Vercel) con
+  `BACKEND_URL` / `NEXT_PUBLIC_BACKEND_URL` como alias legados, o la opción `baseUrl`.
+  Ver [URL del gateway](#url-del-gateway).
 - **No**: la observabilidad (`bootstrapObservability`). Es lógica de arranque
   (kernel), no vocabulario — pertenece a `@ai4u/platform`, no acá.
 
 ## Instalación
 
 ```bash
-npm install github:ai4u-com-co/contracts#v0.6.0
+npm install github:ai4u-com-co/contracts#v0.6.1
 ```
 
 ## Uso
@@ -75,6 +79,28 @@ const miAgente: IAgentAdapter = {
   },
 }
 ```
+
+## URL del gateway
+
+Orden de resolución (en cada request, no al cargar el módulo): opción `baseUrl` >
+env `SAP_BACKEND_URL` > `BACKEND_URL` > `NEXT_PUBLIC_BACKEND_URL`. Valores vacíos o
+solo espacios cuentan como ausentes; se quitan las `/` finales.
+
+Sin ninguna: fuera de producción usa `http://localhost:4100`; en producción
+(`NODE_ENV=production` o `VERCEL_ENV=production`) la llamada falla con un Error que
+nombra `SAP_BACKEND_URL` — nunca hace fetch a localhost. Ojo: `next build`/`next start`
+corren con `NODE_ENV=production` (también en Preview de Vercel), así que ahí la variable
+tiene que estar definida.
+
+```ts
+new BackendClient("tamaprint", apiKey)                                   // SAP_BACKEND_URL
+new BackendClient("tamaprint", apiKey, { baseUrl: "http://gw.interno" }) // explícita
+resolveBackendUrl() // la URL que se usaría ahora (o lanza en prod sin URL)
+```
+
+Los alias `SAP_B1_BACKEND_URL` y `KPIS_APP_URL` del contrato no se leen (el cliente
+nunca los leyó). `BACKEND_URL_ENV_NAMES` exporta la lista; un test la contrasta con
+`ENV_CONTRACT` dentro del monorepo kernel.
 
 ## Atribución con `x-consumer`
 

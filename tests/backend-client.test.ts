@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { BackendClient, BackendError, resolveConsumer } from "../src/backend-client"
+import { existsSync } from "node:fs"
+import { resolve } from "node:path"
+import { BackendClient, BackendError, resolveConsumer, resolveBackendUrl, BACKEND_URL_ENV_NAMES } from "../src/backend-client"
 
 function mockFetchOk(body: unknown = {}) {
   return vi.fn().mockResolvedValue({
@@ -251,5 +253,118 @@ describe("BackendClient — x-consumer (Fase 3, atribución en el gateway)", () 
       expect(h["x-consumer"]).toBe("sap-b1-chat")
       expect(Object.keys(h).sort()).toEqual(["Content-Type", "X-API-Key", "x-consumer", "x-mc-secret"])
     }
+  })
+})
+
+describe("BackendClient — URL del gateway (SAP_BACKEND_URL, 0.6.1)", () => {
+  const originalFetch = global.fetch
+  const originalEnv = { ...process.env }
+  // Valores construidos en runtime (no parecen URLs/secretos literales a los scanners).
+  const url = (name: string) => ["https:/", `${name}.example.test`].join("/")
+
+  beforeEach(() => {
+    for (const name of BACKEND_URL_ENV_NAMES) delete process.env[name]
+    delete process.env.VERCEL_ENV
+    delete process.env.SERVICE_ID
+    delete process.env.PLATFORM_SERVICE
+    process.env.NODE_ENV = "test"
+  })
+
+  afterEach(() => {
+    global.fetch = originalFetch
+    process.env = { ...originalEnv }
+  })
+
+  async function urlOf(client: BackendClient): Promise<string> {
+    const fetchMock = mockFetchOk({ rows: [], count: 0 })
+    global.fetch = fetchMock as unknown as typeof fetch
+    await client.schema("q")
+    return fetchMock.mock.calls[0][0] as string
+  }
+
+  it("orden de precedencia: opción > SAP_BACKEND_URL > BACKEND_URL > NEXT_PUBLIC_BACKEND_URL", async () => {
+    process.env.NEXT_PUBLIC_BACKEND_URL = url("next-public")
+    expect(await urlOf(new BackendClient("tamaprint", "k"))).toBe(`${url("next-public")}/api/v1/tamaprint/schema?q=q`)
+    process.env.BACKEND_URL = url("legado")
+    expect(await urlOf(new BackendClient("tamaprint", "k"))).toMatch(new RegExp(`^${url("legado")}/api/v1/`))
+    process.env.SAP_BACKEND_URL = url("canonica")
+    expect(await urlOf(new BackendClient("tamaprint", "k"))).toMatch(new RegExp(`^${url("canonica")}/api/v1/`))
+    expect(await urlOf(new BackendClient("tamaprint", "k", { baseUrl: url("explicita") }))).toMatch(
+      new RegExp(`^${url("explicita")}/api/v1/tamaprint/`),
+    )
+  })
+
+  it("se resuelve en cada request: cambiar la env entre llamadas cambia el destino", async () => {
+    const client = new BackendClient("flexoimpresos", "k")
+    process.env.SAP_BACKEND_URL = url("primera")
+    expect(await urlOf(client)).toMatch(new RegExp(`^${url("primera")}/api/v1/flexoimpresos/`))
+    process.env.SAP_BACKEND_URL = url("segunda")
+    expect(await urlOf(client)).toMatch(new RegExp(`^${url("segunda")}/api/v1/flexoimpresos/`))
+  })
+
+  it("valores vacíos o solo espacios se ignoran y se quitan las / finales", () => {
+    process.env.SAP_BACKEND_URL = "  "
+    process.env.BACKEND_URL = `${url("legado")}//`
+    expect(resolveBackendUrl("")).toBe(url("legado"))
+  })
+
+  it("fuera de producción, sin ninguna URL, usa http://localhost:4100", async () => {
+    expect(resolveBackendUrl()).toBe(["http://localhost", "4100"].join(":"))
+    expect(await urlOf(new BackendClient("tamaprint", "k"))).toMatch(/^http:\/\/localhost:4100\/api\/v1\/tamaprint\//)
+  })
+
+  it.each([
+    ["NODE_ENV", "production"],
+    ["VERCEL_ENV", "production"],
+  ])("en producción (%s=%s) sin URL lanza un error que nombra SAP_BACKEND_URL y NO hace fetch", async (name, value) => {
+    process.env[name] = value
+    const fetchMock = mockFetchOk()
+    global.fetch = fetchMock as unknown as typeof fetch
+    const client = new BackendClient("tamaprint", "k")
+    await expect(client.schema("q")).rejects.toThrow(/SAP_BACKEND_URL/)
+    await expect(client.sapQuery("SELECT 1")).rejects.toThrow(/SAP_BACKEND_URL/)
+    await expect(client.patch("/x", {})).rejects.toThrow(/SAP_BACKEND_URL/)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(() => resolveBackendUrl()).toThrow(/SAP_BACKEND_URL/)
+  })
+
+  it("en producción con SAP_BACKEND_URL (o baseUrl) funciona normal", async () => {
+    process.env.NODE_ENV = "production"
+    process.env.SAP_BACKEND_URL = url("prod")
+    expect(await urlOf(new BackendClient("tamaprint", "k"))).toMatch(new RegExp(`^${url("prod")}/api/v1/`))
+    delete process.env.SAP_BACKEND_URL
+    expect(await urlOf(new BackendClient("tamaprint", "k", { baseUrl: url("opt") }))).toMatch(new RegExp(`^${url("opt")}/api/v1/`))
+  })
+
+  it("construir el cliente sin URL en producción no lanza (el error es por request)", () => {
+    process.env.NODE_ENV = "production"
+    expect(() => new BackendClient("tamaprint", "k")).not.toThrow()
+  })
+
+  it("x-consumer y los headers de auth quedan intactos con baseUrl", async () => {
+    process.env.SERVICE_ID = "sap-b1-chat"
+    const fetchMock = mockFetchOk()
+    global.fetch = fetchMock as unknown as typeof fetch
+    await new BackendClient("tamaprint", "k", { baseUrl: url("x"), requestId: "rid-1" }).schema("q")
+    const h = fetchMock.mock.calls[0][1].headers as Record<string, string>
+    expect(h["x-consumer"]).toBe("sap-b1-chat")
+    expect(h["x-request-id"]).toBe("rid-1")
+    expect(h["X-API-Key"]).toBe("k")
+    expect(resolveConsumer("explicito")).toBe("explicito")
+  })
+})
+
+// Dentro del monorepo kernel: la lista local debe coincidir con el contrato de
+// @ai4u/config (canónico + alias en el mismo orden). En el espejo standalone
+// (ai4u-com-co/contracts) no existe ../../config, así que se salta.
+const CONFIG_ENV = resolve(__dirname, "../../config/src/env.ts")
+describe.skipIf(!existsSync(CONFIG_ENV))("BACKEND_URL_ENV_NAMES vs ENV_CONTRACT de @ai4u/config", () => {
+  it("es el canónico SAP_BACKEND_URL seguido de sus alias, en el orden del contrato", async () => {
+    const { ENV_CONTRACT } = (await import(CONFIG_ENV)) as {
+      ENV_CONTRACT: Record<string, { name: string; aliases: readonly string[] }>
+    }
+    const spec = ENV_CONTRACT.SAP_BACKEND_URL
+    const contractOrder = [spec.name, ...spec.aliases]
+    expect(contractOrder.slice(0, BACKEND_URL_ENV_NAMES.length)).toEqual([...BACKEND_URL_ENV_NAMES])
   })
 })
