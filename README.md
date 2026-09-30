@@ -49,13 +49,16 @@ Distribución: igual que `@ai4u/platform`, `@ai4u/mc-sso`, `@ai4u/design-system`
   `SAP_BACKEND_URL` (canónica en `@ai4u/config`, Shared Env Var del team en Vercel) con
   `BACKEND_URL` / `NEXT_PUBLIC_BACKEND_URL` como alias legados, o la opción `baseUrl`.
   Ver [URL del gateway](#url-del-gateway).
+- **Sí (desde v0.7.0)**: headers extra por request (`extraHeaders`), pensado para la
+  identidad OIDC de la app hacia el gateway (Fase 3). Ver
+  [Headers extra por request](#headers-extra-por-request-identidad-oidc).
 - **No**: la observabilidad (`bootstrapObservability`). Es lógica de arranque
   (kernel), no vocabulario — pertenece a `@ai4u/platform`, no acá.
 
 ## Instalación
 
 ```bash
-npm install github:ai4u-com-co/contracts#v0.6.1
+npm install github:ai4u-com-co/contracts#v0.7.0
 ```
 
 ## Uso
@@ -101,6 +104,40 @@ resolveBackendUrl() // la URL que se usaría ahora (o lanza en prod sin URL)
 Los alias `SAP_B1_BACKEND_URL` y `KPIS_APP_URL` del contrato no se leen (el cliente
 nunca los leyó). `BACKEND_URL_ENV_NAMES` exporta la lista; un test la contrasta con
 `ENV_CONTRACT` dentro del monorepo kernel.
+
+## Headers extra por request (identidad OIDC)
+
+Opción `extraHeaders?: () => Promise<Record<string, string>> | Record<string, string>`.
+Ejemplo real de `sap-b1-chat` (`app/api/chat/route.ts`), con el helper de
+`@ai4u/platform/gateway-identity` (desde platform v0.6.0):
+
+```ts
+import { BackendClient } from "@ai4u/contracts"
+import { getGatewayIdentityHeaders } from "@ai4u/platform/gateway-identity"
+
+const client = new BackendClient(tenantId, apiKey, {
+  baseUrl: backendUrl,
+  requestId: apiCtx.requestId,
+  consumer: "sap-b1-chat",
+  // Se evalúa en CADA request: el token OIDC vence, nunca se cachea acá.
+  extraHeaders: () => getGatewayIdentityHeaders(), // → { "x-ai4u-identity": "<jwt>" } o {}
+})
+```
+
+Reglas:
+- **Por request**: la función se llama antes de cada `get`/`post`/`patch`; el cliente
+  no guarda el resultado (el caché del token, si lo hay, es del helper).
+- **No pisa auth ni trazabilidad**: `X-API-Key`, `x-mc-secret`, `x-consumer` y
+  `x-request-id` (sin distinguir mayúsculas, exportados como
+  `PROTECTED_BACKEND_HEADERS`) siempre los pone el cliente; si `extraHeaders` los
+  trae, se descartan — ni pisan un valor existente ni inyectan uno que el cliente no mandaba.
+- **Fail-open**: si la función lanza, su promesa se rechaza o devuelve algo que no es
+  objeto, la request sale igual sin los headers extra y el cliente no lanza. El
+  timeout es de quien la pasa (`getGatewayIdentityHeaders` ya trae 1.5 s y devuelve `{}`).
+- Entradas con nombre de header inválido o valor no-string / con CR-LF se descartan una
+  por una (para que `fetch` no rechace la request entera).
+- `@ai4u/contracts` sigue **sin dependencias**: no importa `@vercel/oidc` ni
+  `@ai4u/platform`; el caller inyecta la función.
 
 ## Atribución con `x-consumer`
 

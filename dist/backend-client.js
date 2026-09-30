@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BackendClient = exports.BackendError = exports.BACKEND_URL_ENV_NAMES = void 0;
+exports.BackendClient = exports.PROTECTED_BACKEND_HEADERS = exports.BackendError = exports.BACKEND_URL_ENV_NAMES = void 0;
 exports.resolveConsumer = resolveConsumer;
 exports.resolveBackendUrl = resolveBackendUrl;
 /**
@@ -56,6 +56,31 @@ class BackendError extends Error {
     }
 }
 exports.BackendError = BackendError;
+/**
+ * Headers que `extraHeaders` nunca puede pisar (en minúsculas): los arma el cliente
+ * y son los de auth/trazabilidad que el gateway lee.
+ */
+exports.PROTECTED_BACKEND_HEADERS = ["x-api-key", "x-mc-secret", "x-consumer", "x-request-id"];
+/** token de RFC 9110 (nombre de header válido para `fetch`). */
+const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+/** Valores con CR, LF o NUL los rechaza `fetch`. */
+const HEADER_VALUE_BAD_RE = /[\r\n\0]/;
+/**
+ * Evalúa `extraHeaders` en modo fail-open: cualquier error (sync o async) o un
+ * resultado que no sea objeto → `{}`.
+ */
+async function evalExtraHeaders(fn) {
+    if (!fn)
+        return {};
+    try {
+        const out = await fn();
+        // Copia plana dentro del try: un getter que lance también cae en el fail-open.
+        return out && typeof out === "object" ? { ...out } : {};
+    }
+    catch {
+        return {};
+    }
+}
 /** Primer valor no vacío (tras trim) o undefined. */
 function firstNonEmpty(...values) {
     for (const v of values) {
@@ -127,7 +152,7 @@ class BackendClient {
     get requestId() {
         return this.opts.requestId;
     }
-    headers() {
+    async headers() {
         const headers = { "Content-Type": "application/json" };
         if (this.apiKey) {
             headers["X-API-Key"] = this.apiKey;
@@ -151,11 +176,27 @@ class BackendClient {
         const consumer = resolveConsumer(this.opts.consumer);
         if (consumer)
             headers["x-consumer"] = consumer;
+        // Headers extra (identidad OIDC, Fase 3): al final, sin pisar los protegidos.
+        const extra = await evalExtraHeaders(this.opts.extraHeaders);
+        const protectedNames = exports.PROTECTED_BACKEND_HEADERS;
+        for (const [name, value] of Object.entries(extra)) {
+            const lower = name.toLowerCase();
+            if (protectedNames.includes(lower))
+                continue;
+            if (!HEADER_NAME_RE.test(name) || typeof value !== "string" || HEADER_VALUE_BAD_RE.test(value))
+                continue;
+            // Mismo header con otra capitalización (p. ej. content-type): reemplaza, no duplica.
+            for (const existing of Object.keys(headers)) {
+                if (existing.toLowerCase() === lower)
+                    delete headers[existing];
+            }
+            headers[name] = value;
+        }
         return headers;
     }
     async get(path) {
         const res = await fetch(`${this.base}${path}`, {
-            headers: this.headers(),
+            headers: await this.headers(),
             cache: "no-store",
         });
         if (!res.ok) {
@@ -167,7 +208,7 @@ class BackendClient {
     async post(path, body) {
         const res = await fetch(`${this.base}${path}`, {
             method: "POST",
-            headers: this.headers(),
+            headers: await this.headers(),
             body: JSON.stringify(body),
             cache: "no-store",
         });
@@ -180,7 +221,7 @@ class BackendClient {
     async patch(path, body) {
         const res = await fetch(`${this.base}${path}`, {
             method: "PATCH",
-            headers: this.headers(),
+            headers: await this.headers(),
             body: JSON.stringify(body),
             cache: "no-store",
         });

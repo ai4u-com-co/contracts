@@ -64,7 +64,28 @@ export interface BackendClientOptions {
      * (`orderloader-tamaprint`).
      */
     consumer?: string;
+    /**
+     * Headers extra que se agregan a CADA request (p. ej. la identidad OIDC de la app
+     * hacia el gateway: `() => getGatewayIdentityHeaders()` de
+     * `@ai4u/platform/gateway-identity`).
+     *
+     * - Se evalúa en cada request y nunca se cachea (un token de identidad vence).
+     * - Se mezcla AL FINAL, pero no puede pisar los headers que arma el cliente:
+     *   `X-API-Key`, `x-mc-secret`, `x-consumer` y `x-request-id` (comparación sin
+     *   distinguir mayúsculas). Si los trae, se descartan y ganan los del cliente.
+     * - Fail-open: si la función lanza o su promesa se rechaza, la request sigue sin
+     *   los headers extra y no lanza. El timeout es responsabilidad de quien la pasa
+     *   (`getGatewayIdentityHeaders` ya trae el suyo).
+     * - Entradas con nombre de header inválido o valor no-string / con saltos de línea
+     *   se descartan (evita que `fetch` rechace la request entera).
+     */
+    extraHeaders?: () => Promise<Record<string, string>> | Record<string, string>;
 }
+/**
+ * Headers que `extraHeaders` nunca puede pisar (en minúsculas): los arma el cliente
+ * y son los de auth/trazabilidad que el gateway lee.
+ */
+export declare const PROTECTED_BACKEND_HEADERS: readonly ["x-api-key", "x-mc-secret", "x-consumer", "x-request-id"];
 /**
  * Resuelve el valor de `x-consumer`: opción explícita > env `SERVICE_ID` >
  * alias `PLATFORM_SERVICE` > undefined (no se manda el header).

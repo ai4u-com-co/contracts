@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { existsSync } from "node:fs"
 import { resolve } from "node:path"
-import { BackendClient, BackendError, resolveConsumer, resolveBackendUrl, BACKEND_URL_ENV_NAMES } from "../src/backend-client"
+import { BackendClient, BackendError, resolveConsumer, resolveBackendUrl, BACKEND_URL_ENV_NAMES, PROTECTED_BACKEND_HEADERS } from "../src/backend-client"
 
 function mockFetchOk(body: unknown = {}) {
   return vi.fn().mockResolvedValue({
@@ -351,6 +351,159 @@ describe("BackendClient — URL del gateway (SAP_BACKEND_URL, 0.6.1)", () => {
     expect(h["x-request-id"]).toBe("rid-1")
     expect(h["X-API-Key"]).toBe("k")
     expect(resolveConsumer("explicito")).toBe("explicito")
+  })
+})
+
+describe("BackendClient — extraHeaders (identidad OIDC, 0.7.0)", () => {
+  const originalFetch = global.fetch
+  const originalEnv = { ...process.env }
+  // Valores construidos en runtime (no parecen tokens/secretos literales a los scanners).
+  const fake = (name: string) => ["valor", name, "prueba"].join("-")
+
+  beforeEach(() => {
+    delete process.env.SERVICE_ID
+    delete process.env.PLATFORM_SERVICE
+    delete process.env.BACKEND_SERVICE_SECRET
+    delete process.env.MISSION_CONTROL_SECRET
+  })
+
+  afterEach(() => {
+    global.fetch = originalFetch
+    process.env = { ...originalEnv }
+  })
+
+  async function headersOf(client: BackendClient) {
+    const fetchMock = mockFetchOk({ rows: [], count: 0 })
+    global.fetch = fetchMock as unknown as typeof fetch
+    await client.schema("q")
+    await client.sapQuery("SELECT 1")
+    await client.patch("/x", {})
+    return fetchMock.mock.calls.map((c) => c[1].headers as Record<string, string>)
+  }
+
+  it("agrega los headers en GET, POST y PATCH (función async)", async () => {
+    const client = new BackendClient("tamaprint", "k", {
+      extraHeaders: async () => ({ "x-ai4u-identity": fake("token") }),
+    })
+    const all = await headersOf(client)
+    expect(all).toHaveLength(3)
+    for (const h of all) expect(h["x-ai4u-identity"]).toBe(fake("token"))
+  })
+
+  it("acepta una función síncrona", async () => {
+    const client = new BackendClient("tamaprint", "k", { extraHeaders: () => ({ "x-ai4u-identity": fake("sync") }) })
+    for (const h of await headersOf(client)) expect(h["x-ai4u-identity"]).toBe(fake("sync"))
+  })
+
+  it("se evalúa en CADA request, nunca se cachea (el token vence)", async () => {
+    let n = 0
+    const extraHeaders = vi.fn(async () => ({ "x-ai4u-identity": fake(`t${++n}`) }))
+    const client = new BackendClient("tamaprint", "k", { extraHeaders })
+    const all = await headersOf(client)
+    expect(extraHeaders).toHaveBeenCalledTimes(3)
+    expect(all.map((h) => h["x-ai4u-identity"])).toEqual([fake("t1"), fake("t2"), fake("t3")])
+  })
+
+  it("no puede pisar X-API-Key, x-mc-secret, x-consumer ni x-request-id (sin importar mayúsculas)", async () => {
+    const secreto = fake("secreto")
+    process.env.MISSION_CONTROL_SECRET = secreto
+    const client = new BackendClient("tamaprint", "clave-real", {
+      requestId: "rid-1",
+      consumer: "sap-b1-chat",
+      extraHeaders: () => ({
+        "X-API-Key": "pisada",
+        "x-api-key": "pisada",
+        "X-MC-SECRET": "pisada",
+        "x-consumer": "otro",
+        "X-Request-Id": "otro",
+        "x-ai4u-identity": fake("token"),
+      }),
+    })
+    for (const h of await headersOf(client)) {
+      expect(h["X-API-Key"]).toBe("clave-real")
+      expect(h["x-mc-secret"]).toBe(secreto)
+      expect(h["x-consumer"]).toBe("sap-b1-chat")
+      expect(h["x-request-id"]).toBe("rid-1")
+      expect(h["x-ai4u-identity"]).toBe(fake("token"))
+      expect(Object.keys(h).sort()).toEqual(
+        ["Content-Type", "X-API-Key", "x-ai4u-identity", "x-consumer", "x-mc-secret", "x-request-id"],
+      )
+    }
+  })
+
+  it("tampoco puede inyectar un header protegido que el cliente no manda (p. ej. x-mc-secret sin env)", async () => {
+    const client = new BackendClient("tamaprint", "", {
+      extraHeaders: () => ({ "x-mc-secret": "inyectado", "X-API-Key": "inyectada", "x-consumer": "c", "x-request-id": "r" }),
+    })
+    for (const h of await headersOf(client)) {
+      const lower = Object.keys(h).map((k) => k.toLowerCase())
+      for (const name of PROTECTED_BACKEND_HEADERS) expect(lower).not.toContain(name)
+    }
+  })
+
+  it.each([
+    ["lanza síncrono", () => { throw new Error("sin contexto OIDC") }],
+    ["promesa rechazada", async () => { throw new Error("oidc caído") }],
+    ["devuelve null", () => null as unknown as Record<string, string>],
+  ])("fail-open (%s): la request sigue sin los extra y no lanza", async (_label, extraHeaders) => {
+    const client = new BackendClient("tamaprint", "k", { consumer: "sap-b1-chat", extraHeaders })
+    const all = await headersOf(client)
+    expect(all).toHaveLength(3)
+    for (const h of all) {
+      expect(h).toEqual({ "Content-Type": "application/json", "X-API-Key": "k", "x-consumer": "sap-b1-chat" })
+    }
+  })
+
+  it("descarta entradas inválidas (nombre ilegal, valor no-string o con salto de línea) sin tumbar la request", async () => {
+    const client = new BackendClient("tamaprint", "k", {
+      extraHeaders: () =>
+        ({
+          "nombre invalido": "x",
+          "x-numero": 1,
+          "x-crlf": "a\r\nx-inyectado: b",
+          "x-ok": "bien",
+        }) as unknown as Record<string, string>,
+    })
+    for (const h of await headersOf(client)) {
+      expect(h["x-ok"]).toBe("bien")
+      expect(h).not.toHaveProperty("nombre invalido")
+      expect(h).not.toHaveProperty("x-numero")
+      expect(h).not.toHaveProperty("x-crlf")
+    }
+  })
+
+  it("un header no protegido con otra capitalización reemplaza al del cliente en vez de duplicarlo", async () => {
+    const client = new BackendClient("tamaprint", "k", { extraHeaders: () => ({ "content-type": "application/json; charset=utf-8" }) })
+    for (const h of await headersOf(client)) {
+      expect(h["content-type"]).toBe("application/json; charset=utf-8")
+      expect(h).not.toHaveProperty("Content-Type")
+    }
+  })
+
+  it("en producción sin URL lanza el error de SAP_BACKEND_URL sin evaluar extraHeaders", async () => {
+    for (const name of BACKEND_URL_ENV_NAMES) delete process.env[name]
+    process.env.NODE_ENV = "production"
+    const extraHeaders = vi.fn(() => ({ "x-ai4u-identity": "t" }))
+    const fetchMock = mockFetchOk()
+    global.fetch = fetchMock as unknown as typeof fetch
+    await expect(new BackendClient("tamaprint", "k", { extraHeaders }).schema("q")).rejects.toThrow(/SAP_BACKEND_URL/)
+    expect(extraHeaders).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("compatibilidad: sin extraHeaders los headers son exactamente los de 0.6.1", async () => {
+    const secreto = fake("s")
+    process.env.MISSION_CONTROL_SECRET = secreto
+    const client = new BackendClient("tamaprint", "S2S_AUTH", { requestId: "rid", consumer: "c" })
+    for (const h of await headersOf(client)) {
+      expect(h).toEqual({
+        "Content-Type": "application/json",
+        "X-API-Key": "S2S_AUTH",
+        "x-mc-secret": secreto,
+        "x-request-id": "rid",
+        "x-consumer": "c",
+      })
+    }
   })
 })
 

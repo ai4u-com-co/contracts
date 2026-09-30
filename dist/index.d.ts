@@ -1,6 +1,6 @@
 export { ENTITY_MAP } from "./entity-map";
 export type { EntityConfig } from "./entity-map";
-export { BackendClient, BackendError, resolveConsumer, resolveBackendUrl, BACKEND_URL_ENV_NAMES } from "./backend-client";
+export { BackendClient, BackendError, resolveConsumer, resolveBackendUrl, BACKEND_URL_ENV_NAMES, PROTECTED_BACKEND_HEADERS } from "./backend-client";
 export type { BackendClientOptions } from "./backend-client";
 export type { IAgentAdapter, AgentRunOptions, AgentRunResult } from "./agent-adapter";
 export { SAP_TABLE_SCHEMAS } from "./sap-table-schemas";

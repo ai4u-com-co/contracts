@@ -1,5 +1,26 @@
 # Changelog — @ai4u/contracts
 
+## 0.7.0 — 2026-09-30
+
+### Agregado
+- Opción `extraHeaders?: () => Promise<Record<string, string>> | Record<string, string>`
+  en `BackendClientOptions`: headers extra evaluados en **cada** request (nunca
+  cacheados), pensados para la identidad OIDC hacia el gateway
+  (`() => getGatewayIdentityHeaders()` de `@ai4u/platform/gateway-identity`).
+- Se mezclan al final pero **no pueden pisar ni inyectar** `X-API-Key`, `x-mc-secret`,
+  `x-consumer` ni `x-request-id` (comparación sin mayúsculas; exportados como
+  `PROTECTED_BACKEND_HEADERS`). Un header no protegido con otra capitalización
+  reemplaza al del cliente en vez de duplicarse.
+- Fail-open: si `extraHeaders` lanza, se rechaza o no devuelve un objeto, la request
+  sale sin ellos y no lanza. Entradas con nombre inválido o valor no-string / con
+  CR-LF se descartan una por una.
+
+### Sin cambios
+- Sin `extraHeaders`, los headers son exactamente los de 0.6.1. Sigue sin
+  dependencias (no agrega `@vercel/oidc` ni `@ai4u/platform`).
+- En producción sin URL, el error de `SAP_BACKEND_URL` sale antes de evaluar
+  `extraHeaders`.
+
 ## 0.6.1 — 2026-09-29
 
 ### Cambiado

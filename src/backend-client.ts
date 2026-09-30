@@ -92,6 +92,48 @@ export interface BackendClientOptions {
    * (`orderloader-tamaprint`).
    */
   consumer?: string
+  /**
+   * Headers extra que se agregan a CADA request (p. ej. la identidad OIDC de la app
+   * hacia el gateway: `() => getGatewayIdentityHeaders()` de
+   * `@ai4u/platform/gateway-identity`).
+   *
+   * - Se evalúa en cada request y nunca se cachea (un token de identidad vence).
+   * - Se mezcla AL FINAL, pero no puede pisar los headers que arma el cliente:
+   *   `X-API-Key`, `x-mc-secret`, `x-consumer` y `x-request-id` (comparación sin
+   *   distinguir mayúsculas). Si los trae, se descartan y ganan los del cliente.
+   * - Fail-open: si la función lanza o su promesa se rechaza, la request sigue sin
+   *   los headers extra y no lanza. El timeout es responsabilidad de quien la pasa
+   *   (`getGatewayIdentityHeaders` ya trae el suyo).
+   * - Entradas con nombre de header inválido o valor no-string / con saltos de línea
+   *   se descartan (evita que `fetch` rechace la request entera).
+   */
+  extraHeaders?: () => Promise<Record<string, string>> | Record<string, string>
+}
+
+/**
+ * Headers que `extraHeaders` nunca puede pisar (en minúsculas): los arma el cliente
+ * y son los de auth/trazabilidad que el gateway lee.
+ */
+export const PROTECTED_BACKEND_HEADERS = ["x-api-key", "x-mc-secret", "x-consumer", "x-request-id"] as const
+
+/** token de RFC 9110 (nombre de header válido para `fetch`). */
+const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+/** Valores con CR, LF o NUL los rechaza `fetch`. */
+const HEADER_VALUE_BAD_RE = /[\r\n\0]/
+
+/**
+ * Evalúa `extraHeaders` en modo fail-open: cualquier error (sync o async) o un
+ * resultado que no sea objeto → `{}`.
+ */
+async function evalExtraHeaders(fn: BackendClientOptions["extraHeaders"]): Promise<Record<string, string>> {
+  if (!fn) return {}
+  try {
+    const out = await fn()
+    // Copia plana dentro del try: un getter que lance también cae en el fail-open.
+    return out && typeof out === "object" ? { ...out } : {}
+  } catch {
+    return {}
+  }
 }
 
 /** Primer valor no vacío (tras trim) o undefined. */
@@ -177,7 +219,7 @@ export class BackendClient {
     return this.opts.requestId
   }
 
-  private headers(): HeadersInit {
+  private async headers(): Promise<Record<string, string>> {
     const headers: Record<string, string> = { "Content-Type": "application/json" }
     if (this.apiKey) {
       headers["X-API-Key"] = this.apiKey
@@ -199,12 +241,26 @@ export class BackendClient {
     if (this.opts.requestId) headers["x-request-id"] = this.opts.requestId
     const consumer = resolveConsumer(this.opts.consumer)
     if (consumer) headers["x-consumer"] = consumer
+
+    // Headers extra (identidad OIDC, Fase 3): al final, sin pisar los protegidos.
+    const extra = await evalExtraHeaders(this.opts.extraHeaders)
+    const protectedNames: readonly string[] = PROTECTED_BACKEND_HEADERS
+    for (const [name, value] of Object.entries(extra)) {
+      const lower = name.toLowerCase()
+      if (protectedNames.includes(lower)) continue
+      if (!HEADER_NAME_RE.test(name) || typeof value !== "string" || HEADER_VALUE_BAD_RE.test(value)) continue
+      // Mismo header con otra capitalización (p. ej. content-type): reemplaza, no duplica.
+      for (const existing of Object.keys(headers)) {
+        if (existing.toLowerCase() === lower) delete headers[existing]
+      }
+      headers[name] = value
+    }
     return headers
   }
 
   async get<T>(path: string): Promise<T> {
     const res = await fetch(`${this.base}${path}`, {
-      headers: this.headers(),
+      headers: await this.headers(),
       cache: "no-store",
     })
     if (!res.ok) {
@@ -217,7 +273,7 @@ export class BackendClient {
   async post<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${this.base}${path}`, {
       method: "POST",
-      headers: this.headers(),
+      headers: await this.headers(),
       body: JSON.stringify(body),
       cache: "no-store",
     })
@@ -231,7 +287,7 @@ export class BackendClient {
   async patch(path: string, body: unknown): Promise<void> {
     const res = await fetch(`${this.base}${path}`, {
       method: "PATCH",
-      headers: this.headers(),
+      headers: await this.headers(),
       body: JSON.stringify(body),
       cache: "no-store",
     })
